@@ -1,0 +1,100 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cpd_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-cpd_db}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - cpd_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prefect:
+    image: prefecthq/prefect:3-python3.12
+    restart: unless-stopped
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_HOME: /prefect
+    ports:
+      - "127.0.0.1:4200:4200"
+    volumes:
+      - prefect_data:/prefect
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  pipeline:
+    build: .
+    image: pai102-crime-pipeline:local
+    restart: unless-stopped
+    command: ["python", "-m", "crime_pipeline.pipeline"]
+    environment:
+      DATA_SOURCE: ${DATA_SOURCE:-csv}
+      CSV_PATH: ${CSV_PATH:-/app/data/police_log.csv}
+      SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN:-}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-cpd_db}
+      DB_USER: ${POSTGRES_USER:-cpd_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PREFECT_API_URL: http://prefect:4200/api
+      PREFECT_CRON: ${PREFECT_CRON:-0 0 * * *}
+      PREFECT_TIMEZONE: ${PREFECT_TIMEZONE:-America/New_York}
+    volumes:
+      - ./data:/app/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prefect:
+        condition: service_healthy
+
+  dashboard:
+    build: .
+    image: pai102-crime-pipeline:local
+    restart: unless-stopped
+    command: ["streamlit", "run", "dashboard.py", "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-cpd_db}
+      DB_USER: ${POSTGRES_USER:-cpd_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["cloud"]
+    restart: unless-stopped
+    environment:
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?Set DASHBOARD_DOMAIN in .env for cloud deployment}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - dashboard
+
+volumes:
+  cpd_data:
+  prefect_data:
+  caddy_data:
+  caddy_config:
